@@ -5,7 +5,7 @@ A self-hosted Python bot that monitors SEC EDGAR filings and market signals in r
 ## What it monitors
 
 **Insider filings (Form 4)**
-Every Form 4 filed on a watchlist company is fetched, parsed, and scored before any alert is posted. Buys and sells run through separate pipelines with different scoring logic. The bot does not just look at dollar value — it scores each transaction across conviction, materiality, and role to filter out noise.
+Every Form 4 filed on a watchlist company is fetched, parsed, and scored before any alert is posted. Buys and sells run through separate pipelines with different scoring logic. The bot does not just look at dollar value it scores each transaction across conviction, materiality, and role to filter out noise.
 
 **Short squeeze conditions**
 A composite score across short float, days to cover, borrow rate, float size, and insider ownership. Checked every cycle and included as a context line on every insider buy alert.
@@ -92,7 +92,7 @@ A flat dollar threshold is the wrong filter. A $50K buy by a CEO doubling their 
 
 Every buy is scored across three dimensions.
 
-**Conviction (up to 40 pts)** — what the insider is risking relative to themselves
+**Conviction (up to 40 pts)** , what the insider is risking relative to themselves
 
 | Factor | Points |
 |---|---|
@@ -112,7 +112,7 @@ Position increase is computed from `sharesOwnedFollowingTransaction` in the Form
 pct_increase = shares_bought / (shares_owned_after - shares_bought)
 ```
 
-**Materiality (up to 35 pts)** — how significant is this buy relative to the company
+**Materiality (up to 35 pts)** , how significant is this buy relative to the company
 
 | Factor | Points |
 |---|---|
@@ -127,7 +127,7 @@ pct_increase = shares_bought / (shares_owned_after - shares_bought)
 | Buy equals 2x average daily volume | 6 |
 | Buy equals 5x+ average daily volume | 10 |
 
-**Role (up to 15 pts)** — how informed is this insider likely to be
+**Role (up to 15 pts)** , how informed is this insider likely to be
 
 | Role | Points |
 |---|---|
@@ -147,7 +147,7 @@ pct_increase = shares_bought / (shares_owned_after - shares_bought)
 
 ## Insider Sale Classification
 
-Insiders sell for many reasons — taxes, diversification, a mortgage, a divorce — but only buy for one. Sells are noisier signals. The bot applies a classification pipeline to every Form 4 before scoring a disposal.
+Insiders sell for many reasons , taxes, diversification, a mortgage, a divorce , but only buy for one. Sells are noisier signals. The bot applies a classification pipeline to every Form 4 before scoring a disposal.
 
 **Transaction code taxonomy**
 
@@ -156,7 +156,7 @@ Only code S (open-market sale) is scored as a sentiment signal. Everything else 
 | Code | What it is | Action |
 |---|---|---|
 | S | Open-market or private sale | Scored |
-| F | Shares withheld for tax when RSUs vest | Dropped — the single biggest false-alarm source |
+| F | Shares withheld for tax when RSUs vest | Dropped , the single biggest false-alarm source |
 | G | Gift to charity or family | Dropped |
 | U | Tender in M&A or change-of-control | Dropped |
 | D | Return or forfeiture to issuer | Dropped |
@@ -171,7 +171,7 @@ is_exercise_dump = exercise_shares_in_filing > 0
                    and 0.5 <= shares_sold / exercise_shares <= 2.0
 ```
 
-Two modifiers apply to every S. A 10b5-1 plan means the insider pre-scheduled this sale months in advance — far less informative than a spontaneous sell, though high-scoring plan sales still post. Percentage of position sold is the most important number on the sell side. Trimming 3% is noise. Dumping 80% is a signal.
+Two modifiers apply to every S. A 10b5-1 plan means the insider pre-scheduled this sale months in advance , far less informative than a spontaneous sell, though high-scoring plan sales still post. Percentage of position sold is the most important number on the sell side. Trimming 3% is noise. Dumping 80% is a signal.
 
 ```
 pct_sold = shares_sold / (shares_owned_after + shares_sold)
@@ -194,7 +194,7 @@ Materiality and Role use the same tables as insider buys.
 
 ## Cluster Detection
 
-When 2 or more insiders file qualifying trades within a 7-day window the bot fires a cluster alert in addition to any individual alerts. A single insider buy or sell can have personal explanations. Multiple insiders acting independently in the same week almost cannot. Cluster buys and cluster sells are tracked separately. Only open-market S-coded transactions feed the sell cluster tracker — tax withholding and exercise-and-dump transactions are excluded from cluster counting.
+When 2 or more insiders file qualifying trades within a 7-day window the bot fires a cluster alert in addition to any individual alerts. A single insider buy or sell can have personal explanations. Multiple insiders acting independently in the same week almost cannot. Cluster buys and cluster sells are tracked separately. Only open-market S-coded transactions feed the sell cluster tracker , tax withholding and exercise-and-dump transactions are excluded from cluster counting.
 
 ## Squeeze Scoring
 
@@ -219,7 +219,7 @@ Scans all Form 4 filings across EDGAR every cycle, not just watchlist tickers. D
 | Data | Source | Notes |
 |---|---|---|
 | Insider filings | SEC EDGAR submissions API | Insiders must file within 2 business days of the trade |
-| Activist filings | SEC EDGAR full-text search | EFTS API ignores its own date filter — the bot filters manually |
+| Activist filings | SEC EDGAR full-text search | EFTS API ignores its own date filter , the bot filters manually |
 | Dilution filings | SEC EDGAR submissions API | Real-time |
 | Short interest and float | Finviz via FINRA | Bi-monthly FINRA data, not intraday |
 | Borrow rate | iborrowdesk.com | Interactive Brokers data, updates during trading hours |
