@@ -1,0 +1,16 @@
+[Unit]
+Description=SEC EDGAR Scanner Discord Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tijn-saes
+WorkingDirectory=/home/tijn-saes/Documents/BOT
+ExecStart=/home/tijn-saes/Documents/BOT/.venv/bin/python main.py
+Restart=always
+RestartSec=10
+StartLimitIntervalSec=0
+
+[Install]
+WantedBy=multi-user.target
