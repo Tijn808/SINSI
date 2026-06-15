@@ -392,38 +392,104 @@ def post_discovery(
     ))
 
 
-def post_dilution_warning(ticker: str, company: str, filing: dict, filing_url: str) -> None:
-    form = filing["form"]
+def post_dilution_warning(
+    ticker: str,
+    company: str,
+    filing: dict,
+    filing_url: str,
+    market: dict | None = None,
+    offering: dict | None = None,
+) -> None:
+    form     = filing["form"]
+    market   = market   or {}
+    offering = offering or {}
 
     if form in {"424B1", "424B2", "424B3", "424B4", "424B5", "424B7"}:
-        title     = f"🚨 Active Offering — ${ticker}"
-        urgency   = "Shares are being sold into the market **right now**."
-        implication = "Any concurrent bullish signals should be discounted."
+        title   = f"🚨 Active Offering — ${ticker}"
+        why     = "A **424B prospectus** was filed — this means shares are being sold into the market **right now**."
     elif form in {"S-3", "S-3/A"}:
-        title     = f"⚠️ Shelf Registration — ${ticker}"
-        urgency   = "The company can sell shares at any point over the next 3 years."
-        implication = "Potential future dilution — watch for follow-on 424B filings."
+        title   = f"⚠️ Shelf Registration — ${ticker}"
+        why     = "An **S-3 shelf registration** was filed — the company can sell shares at any point over the next 3 years. Watch for follow-on 424B filings."
     else:
-        title     = f"⚠️ Offering Registration — ${ticker}"
-        urgency   = f"**{form}** registration statement filed."
-        implication = "This may precede a public share offering."
+        title   = f"⚠️ Offering Registration — ${ticker}"
+        why     = f"An **{form}** registration statement was filed — a public share offering is likely coming."
 
-    description = (
-        f"**{company}** filed a **{form}**.\n"
-        f"> {urgency}\n"
-        f"> {implication}"
-    )
+    atm_note = " (at-the-market program — sold continuously into open market)" if offering.get("is_atm") else ""
+    secondary_note = " (secondary — existing holders selling, **no new dilution**)" if offering.get("is_primary") is False else ""
+
+    description = f"{why}{atm_note}{secondary_note}"
+
+    fields = [
+        {"name": "Form",  "value": form,            "inline": True},
+        {"name": "Filed", "value": filing["filed"], "inline": True},
+    ]
+
+    # Offering size details
+    proceeds  = offering.get("gross_proceeds")
+    shares    = offering.get("shares_offered")
+    price     = offering.get("price_per_share")
+    mkt_price = market.get("price")
+    cap       = market.get("market_cap")
+    float_sh  = market.get("float_shares")
+    shares_out = market.get("shares_outstanding") or (float_sh * 1.2 if float_sh else None)
+
+    if proceeds:
+        proceeds_str = _fmt_usd(proceeds)
+        if cap and cap > 0:
+            pct_cap = proceeds / cap
+            proceeds_str += f"  ({pct_cap:.1%} of market cap)"
+        fields.append({"name": "Gross Proceeds", "value": f"**{proceeds_str}**", "inline": False})
+
+    if shares:
+        shares_str = f"{shares:,.0f}"
+        if shares_out and shares_out > 0:
+            pct_dilution = shares / shares_out
+            shares_str += f"  ({pct_dilution:.1%} of shares outstanding)"
+        fields.append({"name": "Shares Offered", "value": shares_str, "inline": True})
+
+    if price:
+        price_str = f"${price:.2f}"
+        if mkt_price and mkt_price > 0:
+            discount = (mkt_price - price) / mkt_price
+            if abs(discount) > 0.01:
+                price_str += f"  ({abs(discount):.1%} {'discount' if discount > 0 else 'premium'} to market)"
+        fields.append({"name": "Offering Price", "value": price_str, "inline": True})
+
+    # Significance context
+    sig_lines = []
+    if proceeds and cap:
+        pct = proceeds / cap
+        if pct >= 0.30:
+            sig_lines.append(f"⚠️ Offering is {pct:.0%} of market cap — **major dilution**")
+        elif pct >= 0.10:
+            sig_lines.append(f"Offering is {pct:.0%} of market cap — significant dilution")
+        else:
+            sig_lines.append(f"Offering is {pct:.0%} of market cap — moderate dilution")
+    if price and mkt_price:
+        discount = (mkt_price - price) / mkt_price
+        if discount >= 0.10:
+            sig_lines.append(f"⚠️ Offering priced at {discount:.0%} discount to market — aggressive terms")
+        elif discount >= 0.05:
+            sig_lines.append(f"Offering priced at {discount:.0%} discount to market")
+    if offering.get("is_atm"):
+        sig_lines.append("ATM program — dilution is gradual, not all-at-once")
+    if not proceeds and not shares:
+        sig_lines.append("Could not extract offering size — check the filing directly")
+
+    if sig_lines:
+        fields.append({
+            "name":   "Significance",
+            "value":  "\n".join(f"• {l}" for l in sig_lines),
+            "inline": False,
+        })
 
     embed = {
         "author":      {"name": company},
         "title":       title,
         "url":         filing_url,
         "description": description,
-        "fields": [
-            {"name": "Form",  "value": form,            "inline": True},
-            {"name": "Filed", "value": filing["filed"], "inline": True},
-        ],
-        "footer": {"text": f"Accession: {filing['accession']}"},
+        "fields":      fields,
+        "footer":      {"text": f"Accession: {filing['accession']}"},
     }
     _post("dilution", embed, _buttons(
         ("📄 View Filing", filing_url),
@@ -506,15 +572,19 @@ def post_lookup(
     cap       = market.get("market_cap")
     float_sh  = market.get("float_shares")
     short_pct = market.get("short_pct_float")
+    dtc       = market.get("short_ratio")
+    insiders  = market.get("held_pct_insiders")
     sector    = market.get("sector", "")
 
     snapshot_parts = []
-    if price:     snapshot_parts.append(f"${price:.2f}")
-    if cap:       snapshot_parts.append(_fmt_cap(cap))
-    if float_sh:  snapshot_parts.append(f"Float {float_sh/1e6:.1f}M")
-    if short_pct: snapshot_parts.append(f"Short {short_pct:.0%}")
+    if price:      snapshot_parts.append(f"${price:.2f}")
+    if cap:        snapshot_parts.append(_fmt_cap(cap))
+    if float_sh:   snapshot_parts.append(f"Float {float_sh/1e6:.1f}M")
+    if short_pct:  snapshot_parts.append(f"Short {short_pct:.0%}")
+    if dtc:        snapshot_parts.append(f"DTC {dtc:.1f}")
     if borrow_rate: snapshot_parts.append(f"Borrow {borrow_rate:.1%}")
-    if sector:    snapshot_parts.append(sector)
+    if insiders:   snapshot_parts.append(f"Insider own {insiders:.0%}")
+    if sector:     snapshot_parts.append(sector)
 
     fields = [
         {

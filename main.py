@@ -129,12 +129,21 @@ def cmd_filter(args: list[str]) -> None:
         flt = filters.get("float", {})
         prc = filters.get("price", {})
         print(f"Discovery filters (enabled={filters.get('enabled', True)}):")
+        print(f"  Min score  : {filters.get('min_score', 30)}")
         print(f"  Market cap : ${cap.get('min', 0)/1e6:.0f}M – ${cap.get('max', 0)/1e6:.0f}M")
         print(f"  Float      : max {flt.get('max', 0)/1e6:.0f}M shares")
         print(f"  Price      : ${prc.get('min', 0)} – ${prc.get('max', 0)}")
         print(f"  Min buy    : ${filters.get('min_buy_value', 0):,}")
         print(f"  Roles      : {filters.get('roles', 'exec')}")
 
+    elif cmd == "min-score":
+        v = int(float(val))
+        if not (0 <= v <= 100):
+            print("min-score must be between 0 and 100")
+            return
+        filters["min_score"] = v
+        tier = "Notable" if v < 50 else "Strong" if v < 70 else "Exceptional"
+        print(f"Min score set to {v} ({tier}+)")
     elif cmd == "max-cap":
         filters.setdefault("market_cap", {})["max"] = int(_parse_number(val))
         print(f"Max market cap set to ${int(_parse_number(val)):,}")

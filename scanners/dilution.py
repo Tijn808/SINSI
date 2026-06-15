@@ -16,6 +16,7 @@ import config
 import discord_bot
 import state as st
 from data import edgar
+from data.market import get_market_data
 
 DILUTION_FORMS = {
     "S-1", "S-1/A",
@@ -50,6 +51,12 @@ def _scan_company(ticker: str, cik: str, company: str, state: dict) -> None:
 
     print(f"  [dilution] {ticker}: {len(new)} new offering filing(s)")
 
+    # Fetch market data once per company for context (% of cap, float dilution)
+    try:
+        market = get_market_data(ticker)
+    except Exception:
+        market = {}
+
     for filing in new:
         st.mark_seen(state, filing["accession"])
 
@@ -60,6 +67,17 @@ def _scan_company(ticker: str, cik: str, company: str, state: dict) -> None:
             f"{cik_int}/{acc_nodash}/"
         )
 
-        print(f"    → {filing['form']} filed {filing['filed']}")
-        discord_bot.post_dilution_warning(ticker, company, filing, url)
+        # Parse offering details from the actual document
+        offering = {}
+        try:
+            offering = edgar.parse_offering_details(
+                cik, filing["accession"], filing["primary_doc"]
+            )
+        except Exception as e:
+            print(f"    [dilution] Could not parse offering details: {e}")
+
+        print(f"    → {filing['form']} filed {filing['filed']}"
+              + (f" | proceeds ~${offering['gross_proceeds']/1e6:.1f}M"
+                 if offering.get("gross_proceeds") else ""))
+        discord_bot.post_dilution_warning(ticker, company, filing, url, market, offering)
         time.sleep(1)

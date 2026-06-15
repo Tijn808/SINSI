@@ -8,11 +8,13 @@ All public EDGAR endpoints used here:
   https://efts.sec.gov/LATEST/search-index?...           — full-text search (for 13D/13G)
 """
 
+import re
 import time
 import xml.etree.ElementTree as ET
 from datetime import date, timedelta
 
 import requests
+from bs4 import BeautifulSoup
 
 HEADERS = {
     "User-Agent": "SECScanner/1.0 tijnsaes@gmail.com",
@@ -230,6 +232,113 @@ def fetch_shares_outstanding(cik: str) -> int | None:
         return int(latest["val"])
     except Exception:
         return None
+
+
+# ── Offering detail parser (424B / S-3) ───────────────────────────────────────
+
+def parse_offering_details(cik: str, accession: str, primary_doc: str) -> dict:
+    """
+    Fetch a 424B or S-3 document and extract key offering numbers.
+
+    Returns a dict with whatever could be found (all keys are optional):
+      shares_offered   : int   — number of shares being sold
+      price_per_share  : float — offering price per share
+      gross_proceeds   : float — total dollar amount of the offering
+      shelf_amount     : float — max shelf size for S-3 filings
+      is_atm           : bool  — at-the-market (continuous) offering
+      is_primary       : bool  — company selling new shares (vs secondary)
+
+    Parsing is best-effort: 424B formats vary widely. Unrecognised layouts
+    return an empty dict rather than raising.
+    """
+    cik_int      = int(cik)
+    acc_nodash   = accession.replace("-", "")
+    doc_filename = primary_doc.split("/")[-1]
+    url = (
+        f"https://www.sec.gov/Archives/edgar/data/"
+        f"{cik_int}/{acc_nodash}/{doc_filename}"
+    )
+
+    try:
+        resp = _get(url)
+        text = BeautifulSoup(resp.text, "lxml").get_text(" ", strip=True)
+    except Exception:
+        return {}
+
+    result: dict = {}
+
+    # ATM / continuous offering
+    result["is_atm"] = bool(re.search(r"at[\s-]the[\s-]market", text, re.I))
+
+    # Primary vs secondary
+    result["is_primary"] = bool(re.search(
+        r"we\s+are\s+(?:offering|selling)|primary\s+offering|new\s+shares", text, re.I
+    ))
+
+    # ── Shares offered ─────────────────────────────────────────────────────────
+    for pat in [
+        r"offering\s+([\d,]+)\s+shares",
+        r"([\d,]+)\s+shares\s+of\s+(?:our\s+)?common\s+stock\b",
+        r"sale\s+of\s+([\d,]+)\s+shares",
+        r"([\d,]+)\s+shares\s+(?:of\s+common\s+stock\s+)?(?:at|for|in\s+this)",
+    ]:
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                result["shares_offered"] = int(m.group(1).replace(",", ""))
+                break
+            except ValueError:
+                pass
+
+    # ── Price per share ────────────────────────────────────────────────────────
+    for pat in [
+        r"public\s+offering\s+price\s+of\s+\$([\d,.]+)\s+per\s+share",
+        r"price\s+of\s+\$([\d,.]+)\s+per\s+share",
+        r"at\s+\$([\d,.]+)\s+per\s+share",
+        r"\$([\d,.]+)\s+per\s+share",
+    ]:
+        m = re.search(pat, text, re.I)
+        if m:
+            try:
+                result["price_per_share"] = float(m.group(1).replace(",", ""))
+                break
+            except ValueError:
+                pass
+
+    # ── Gross proceeds / aggregate amount ─────────────────────────────────────
+    def _parse_dollar(val_str: str, unit_str: str) -> float | None:
+        try:
+            val  = float(val_str.replace(",", ""))
+            unit = (unit_str or "").lower()
+            if "billion" in unit:  val *= 1e9
+            elif "million" in unit: val *= 1e6
+            elif "thousand" in unit: val *= 1e3
+            return val
+        except ValueError:
+            return None
+
+    for pat in [
+        r"aggregate\s+(?:gross\s+)?proceeds\s+of\s+(?:approximately\s+)?\$([\d,.]+)\s*(million|billion|thousand)?",
+        r"aggregate\s+offering\s+(?:price|amount)\s+of\s+(?:up\s+to\s+)?\$([\d,.]+)\s*(million|billion|thousand)?",
+        r"maximum\s+aggregate\s+offering\s+(?:price|amount)\s+of\s+\$([\d,.]+)\s*(million|billion|thousand)?",
+        r"gross\s+proceeds\s+of\s+(?:approximately\s+)?\$([\d,.]+)\s*(million|billion|thousand)?",
+        r"up\s+to\s+\$([\d,.]+)\s*(million|billion|thousand)?\s+(?:of\s+)?(?:our\s+)?(?:common\s+stock|securities|shares)",
+    ]:
+        m = re.search(pat, text, re.I)
+        if m:
+            val = _parse_dollar(m.group(1), m.group(2) if m.lastindex >= 2 else "")
+            if val:
+                result["gross_proceeds"] = val
+                break
+
+    # If we have shares + price but no proceeds, compute it
+    if "gross_proceeds" not in result:
+        s = result.get("shares_offered")
+        p = result.get("price_per_share")
+        if s and p:
+            result["gross_proceeds"] = s * p
+
+    return result
 
 
 # ── Activist filings (SC 13D / SC 13G) ───────────────────────────────────────

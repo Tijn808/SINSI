@@ -58,6 +58,7 @@ def load_filters() -> dict:
 def _default_filters() -> dict:
     return {
         "enabled":       True,
+        "min_score":     30,
         "market_cap":    {"min": 10_000_000, "max": 500_000_000},
         "float":         {"max": 50_000_000},
         "price":         {"min": 1.0, "max": 50.0},
@@ -269,7 +270,8 @@ def run(state: dict) -> None:
         # ── Significance score ─────────────────────────────────────────────
         # Gate on composite score — replaces crude price-action-only check.
         score, sig_factors = calc_insider_score(best_txn, details, market)
-        if score < config.MIN_SIGNIFICANCE_SCORE and not is_director_special:
+        min_score = filters.get("min_score", config.MIN_SIGNIFICANCE_SCORE)
+        if score < min_score and not is_director_special:
             print(f"  [discovery] {ticker} score {score} below threshold — skipped")
             continue
 
