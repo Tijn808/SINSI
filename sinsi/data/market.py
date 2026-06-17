@@ -14,10 +14,19 @@ Finviz reflects the latest FINRA data, so it's as good as any free source.
 """
 
 import re
+import sys
 import time
+from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
+
+# Allow 'from core.market_client import ...' when running from sinsi/ directory
+_root = Path(__file__).resolve().parent.parent.parent  # sinsi/data/ → sinsi/ → BOT/
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from core.market_client import _cache_get as _mkt_cache_get, _cache_set as _mkt_cache_set
 
 _FINVIZ_HEADERS = {
     "User-Agent": (
@@ -100,34 +109,54 @@ def _num(s: str | None) -> float | None:
         return None
 
 
+_MARKET_DATA_FIELDS = [
+    "short_pct_float", "short_ratio", "float_shares", "held_pct_insiders",
+    "avg_volume", "price", "market_cap", "sector", "industry",
+    "rel_volume", "volume", "perf_week", "perf_month", "perf_quarter",
+    "week_52_high", "week_52_low", "atr",
+]
+
+
 def get_market_data(ticker: str) -> dict:
-    """
-    Pull key squeeze-relevant metrics from Finviz.
+    """Pull key squeeze-relevant metrics from Finviz, with per-field TTL caching.
 
     Returns dict (all values may be None if unavailable):
       short_pct_float    — short interest as fraction of float (e.g. 0.30)
       short_ratio        — days to cover
-      float_shares       — tradeable float (int)
+      float_shares       — tradeable float
       held_pct_insiders  — fraction of shares held by insiders
       avg_volume         — 3-month avg daily volume
       price              — latest price
+    Slow-changing fields (short_pct_float, float_shares, sector) are cached for
+    hours so the squeeze scanner's 5-minute loop doesn't redundantly re-fetch them.
     """
+    # Check which fields are still fresh in the shared cache
+    cached_result: dict = {}
+    stale_fields: list[str] = []
+    for field in _MARKET_DATA_FIELDS:
+        hit, value = _mkt_cache_get(ticker, field)
+        if hit:
+            cached_result[field] = value
+        else:
+            stale_fields.append(field)
+
+    if not stale_fields:
+        return cached_result
+
+    # Fetch from Finviz (all fields in one page load)
     try:
-        html = _finviz_get(ticker)
+        html  = _finviz_get(ticker)
         stats = _parse_finviz_stats(html)
-        return {
-            # Short / squeeze
+        fresh = {
             "short_pct_float":   _pct(stats.get("Short Float")),
             "short_ratio":       _num(stats.get("Short Ratio")),
             "float_shares":      _shares(stats.get("Shs Float")),
             "held_pct_insiders": _pct(stats.get("Insider Own")),
             "avg_volume":        _shares(stats.get("Avg Volume")),
-            # Price / cap
             "price":             _num(stats.get("Price")),
             "market_cap":        _shares(stats.get("Market Cap")),
             "sector":            stats.get("Sector", ""),
             "industry":          stats.get("Industry", ""),
-            # Price action
             "rel_volume":        _num(stats.get("Rel Volume")),
             "volume":            _shares(stats.get("Volume")),
             "perf_week":         _pct(stats.get("Perf Week")),
@@ -137,9 +166,12 @@ def get_market_data(ticker: str) -> dict:
             "week_52_low":       _num(stats.get("52W Low")),
             "atr":               _num(stats.get("ATR")),
         }
+        for field, value in fresh.items():
+            _mkt_cache_set(ticker, field, value)  # core client applies per-field TTL
+        return {**cached_result, **fresh}
     except Exception as e:
         print(f"  [market] Finviz fetch failed for {ticker}: {e}")
-        return {}
+        return cached_result
 
 
 def get_borrow_rate(ticker: str) -> float | None:
@@ -155,13 +187,16 @@ def get_borrow_rate(ticker: str) -> float | None:
     try:
         url  = f"https://iborrowdesk.com/api/ticker/{ticker}"
         resp = requests.get(url, headers=_IBORROW_HEADERS, timeout=10)
+        if resp.status_code == 444:
+            # 444 = ticker not on IBKR's hard-to-borrow list → easy to borrow, no meaningful fee
+            print(f"  [market] {ticker}: ETB (easy to borrow, not on IBD)")
+            return None
         resp.raise_for_status()
-        data = resp.json()
-        daily = data.get("daily", [])
+        data    = resp.json()
+        daily   = data.get("daily", [])
         if not daily:
             return None
-        # Daily list is oldest-first; take the last entry for the current rate
-        latest = daily[-1]
+        latest  = daily[-1]
         fee_pct = latest.get("fee")
         if fee_pct is None:
             return None

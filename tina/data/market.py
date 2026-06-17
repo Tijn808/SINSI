@@ -1,10 +1,19 @@
 """Fetch current stock prices and market caps from Finviz."""
 
 import re
+import sys
 import time
+from pathlib import Path
+
 import requests
 from bs4 import BeautifulSoup
-from concurrent.futures import ThreadPoolExecutor
+
+# Allow 'from core.market_client import ...' when running from tina/ directory
+_root = Path(__file__).resolve().parent.parent.parent  # tina/data/ → tina/ → BOT/
+if str(_root) not in sys.path:
+    sys.path.insert(0, str(_root))
+
+from core.market_client import get_many as _core_get_many
 
 _HEADERS = {
     "User-Agent": (
@@ -84,33 +93,26 @@ def get_market_caps(tickers: list[str], limit: int = 80, delay: float = 0.15) ->
     return result
 
 
-_SCREEN_WORKERS = 3  # 3 parallel workers avoids Finviz rate-limiting (12 workers = 98% blocked)
-
-
 def get_ticker_screen(
     tickers: list[str],
     limit: int = 10_000,
     need_sector: bool = False,
 ) -> dict[str, dict]:
-    """Fetch market cap (+ optionally sector) for many tickers via Finviz.
+    """Fetch market cap (+ optionally sector/industry) for many tickers.
 
-    Uses 3 parallel workers — enough to do 1300 tickers in ~70s without triggering
-    Finviz rate limits (12 workers causes 98% block rate; ETF Nones are fast failures).
+    Delegates to core.market_client which batches via the Finviz screener
+    (20 tickers per HTTP request instead of 1) and caches results with per-field
+    TTLs (market_cap: 4h, sector: permanent).  First call for N tickers takes
+    roughly N/20/3 × 1s wall time; subsequent calls within the TTL are instant.
     Returns {ticker: {market_cap, sector, industry}}.
     """
-    def _fetch(ticker: str) -> tuple[str, dict]:
-        try:
-            stats = _finviz_stats(ticker)
-            return ticker, {
-                "market_cap": _parse_val(stats.get("Market Cap")),
-                "sector":     stats.get("Sector") or "" if need_sector else "",
-                "industry":   stats.get("Industry") or "" if need_sector else "",
-            }
-        except Exception:
-            return ticker, {"market_cap": None, "sector": "", "industry": ""}
-
-    result: dict[str, dict] = {}
-    with ThreadPoolExecutor(max_workers=_SCREEN_WORKERS) as ex:
-        for ticker, data in ex.map(_fetch, tickers[:limit]):
-            result[ticker] = data
-    return result
+    fields = ["market_cap", "sector", "industry"] if need_sector else ["market_cap"]
+    raw    = _core_get_many(tickers[:limit], fields=fields)
+    return {
+        ticker: {
+            "market_cap": data.get("market_cap"),
+            "sector":     data.get("sector", "") if need_sector else "",
+            "industry":   data.get("industry", "") if need_sector else "",
+        }
+        for ticker, data in raw.items()
+    }
