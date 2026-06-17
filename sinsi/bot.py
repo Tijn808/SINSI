@@ -13,8 +13,17 @@ import asyncio
 import json
 import os
 import re
+import signal
+import sys
 import time
 from pathlib import Path
+
+if not Path("config.py").exists():
+    print("ERROR: Run this from the sinsi/ directory.", file=sys.stderr)
+    print("  cd sinsi && ../.venv/bin/python bot.py", file=sys.stderr)
+    sys.exit(1)
+
+import config
 
 import discord
 from discord import app_commands
@@ -44,12 +53,15 @@ async def _watchlist_autocomplete(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    tickers = _load_watchlist().get("tickers", [])
-    return [
-        app_commands.Choice(name=f"{e['ticker']} — {e['name'][:40]}", value=e["ticker"])
-        for e in tickers
-        if current.upper() in e["ticker"]
-    ][:25]
+    try:
+        tickers = _load_watchlist().get("tickers", [])
+        return [
+            app_commands.Choice(name=f"{e['ticker']} — {e['name'][:40]}", value=e["ticker"])
+            for e in tickers
+            if current.upper() in e["ticker"]
+        ][:25]
+    except Exception:
+        return []
 
 
 # ── Persistent add-to-watchlist button ────────────────────────────────────────
@@ -305,6 +317,11 @@ class RolesDiscoveryModal(discord.ui.Modal, title="Roles & Discovery"):
         )
 
 
+def _is_admin(interaction: discord.Interaction) -> bool:
+    member = interaction.user
+    return isinstance(member, discord.Member) and member.guild_permissions.administrator
+
+
 class FilterView(discord.ui.View):
     def __init__(self, filters: dict):
         super().__init__(timeout=300)
@@ -312,18 +329,30 @@ class FilterView(discord.ui.View):
 
     @discord.ui.button(label="Scoring & Size", style=discord.ButtonStyle.primary)
     async def scoring_size(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _is_admin(interaction):
+            await interaction.response.send_message("Only server admins can change filter settings.", ephemeral=True)
+            return
         await interaction.response.send_modal(ScoringSizeModal(self.filters))
 
     @discord.ui.button(label="Price & Buy", style=discord.ButtonStyle.primary)
     async def price_buy(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _is_admin(interaction):
+            await interaction.response.send_message("Only server admins can change filter settings.", ephemeral=True)
+            return
         await interaction.response.send_modal(PriceBuyModal(self.filters))
 
     @discord.ui.button(label="Roles & Discovery", style=discord.ButtonStyle.secondary)
     async def roles_discovery(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _is_admin(interaction):
+            await interaction.response.send_message("Only server admins can change filter settings.", ephemeral=True)
+            return
         await interaction.response.send_modal(RolesDiscoveryModal(self.filters))
 
     @discord.ui.button(label="Reset Defaults", style=discord.ButtonStyle.danger)
     async def reset(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not _is_admin(interaction):
+            await interaction.response.send_message("Only server admins can change filter settings.", ephemeral=True)
+            return
         from scanners.discovery import _default_filters
         _save_filters(_default_filters())
         await interaction.response.send_message("Filters reset to defaults.", ephemeral=True)
@@ -370,12 +399,16 @@ def _do_lookup(ticker: str) -> str:
     except Exception:
         borrow = None
 
-    score, factors = calc_squeeze_score(market, borrow)
+    market_cap = market.get("market_cap")
+    if market_cap and market_cap >= config.SQUEEZE_SUPPRESS_CAP:
+        score, factors = 0, []
+    else:
+        score, factors = calc_squeeze_score(market, borrow)
 
     txns: list[dict] = []
     try:
         filings = edgar.fetch_recent_form4s(cik, lookback_days=30)
-        for f in filings[:15]:
+        for f in filings[:config.LOOKUP_FILING_LIMIT]:
             details = edgar.fetch_form4_details(cik, f["accession"], f["primary_doc"])
             if not details:
                 continue
@@ -515,10 +548,13 @@ async def slash_lookup(interaction: discord.Interaction, ticker: str):
         )
         return
     ticker = ticker.upper()
-    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        return  # interaction expired before we could respond
     loop = asyncio.get_event_loop()
     msg = await loop.run_in_executor(None, _do_lookup, ticker)
-    await interaction.followup.send(msg, view=AddToWatchlistView(ticker), ephemeral=True)
+    await interaction.followup.send(msg, view=AddToWatchlistView(ticker))
 
 
 @client.tree.command(name="add", description="Add a ticker to the watchlist")
@@ -573,7 +609,10 @@ async def slash_list(interaction: discord.Interaction):
     ]
     pages = _paginate(lines, per_page=10)
     pv    = PaginatedView(pages)
-    await interaction.response.send_message(pv._content(), view=pv if len(pages) > 1 else None, ephemeral=True)
+    if len(pages) > 1:
+        await interaction.response.send_message(pv._content(), view=pv)
+    else:
+        await interaction.response.send_message(pv._content())
 
 
 @client.tree.command(name="perf", description="Show price performance since each ticker was added")
@@ -583,12 +622,18 @@ async def slash_perf(interaction: discord.Interaction):
             "This command only works in the designated alerts channel.", ephemeral=True
         )
         return
-    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        return
     loop  = asyncio.get_event_loop()
     lines = await loop.run_in_executor(None, _do_perf)
     pages = _paginate(lines, per_page=8)
     pv    = PaginatedView(pages)
-    await interaction.followup.send(pv._content(), view=pv if len(pages) > 1 else None, ephemeral=True)
+    if len(pages) > 1:
+        await interaction.followup.send(pv._content(), view=pv)
+    else:
+        await interaction.followup.send(pv._content())
 
 
 @client.tree.command(name="scores", description="Show squeeze scores for all watchlist tickers")
@@ -598,11 +643,14 @@ async def slash_scores(interaction: discord.Interaction):
             "This command only works in the designated alerts channel.", ephemeral=True
         )
         return
-    await interaction.response.defer(ephemeral=True)
+    try:
+        await interaction.response.defer()
+    except discord.errors.NotFound:
+        return
     loop    = asyncio.get_event_loop()
     results = await loop.run_in_executor(None, _do_scores)
     if not results:
-        await interaction.followup.send("Watchlist is empty.", ephemeral=True)
+        await interaction.followup.send("Watchlist is empty.")
         return
     lines = []
     for r in results:
@@ -613,7 +661,10 @@ async def slash_scores(interaction: discord.Interaction):
         lines.append("")
     pages = _paginate(lines, per_page=15)
     pv    = PaginatedView(pages)
-    await interaction.followup.send(pv._content(), view=pv if len(pages) > 1 else None, ephemeral=True)
+    if len(pages) > 1:
+        await interaction.followup.send(pv._content(), view=pv)
+    else:
+        await interaction.followup.send(pv._content())
 
 
 @client.tree.command(name="filter", description="View and change discovery filter settings")
@@ -629,6 +680,160 @@ async def slash_filter(interaction: discord.Interaction):
     )
 
 
+# ── /discover ─────────────────────────────────────────────────────────────────
+
+@client.tree.command(name="discover", description="Scan recent Form 4 filings for qualifying insider buys right now")
+@app_commands.describe(hours="How many hours back to search (default 24, max 72)")
+async def slash_discover(interaction: discord.Interaction, hours: int = 24):
+    if not _check_channel(interaction):
+        await interaction.response.send_message(
+            "This command only works in the designated alerts channel.", ephemeral=True
+        )
+        return
+
+    hours = max(1, min(hours, 72))
+    await interaction.response.defer()
+    await interaction.followup.send(
+        f"🔍 **Scanning the last {hours}h of Form 4 filings...** This can take up to 30 seconds."
+    )
+
+    loop = asyncio.get_event_loop()
+
+    def _run_discover():
+        from scanners.discovery import _fetch_feed, load_filters, _is_qualifying_role, _passes_market_filters
+        from data import edgar
+        from data.score import calc_insider_score
+        from datetime import datetime, timezone, timedelta
+        import time as _time
+
+        filters   = load_filters()
+        cutoff_dt = datetime.now(timezone.utc) - timedelta(hours=hours)
+
+        try:
+            feed = _fetch_feed()
+        except Exception as e:
+            return [], f"EDGAR feed error: {e}"
+
+        results   = []
+        near      = []
+        processed = 0
+
+        for entry in feed:
+            cik = entry.get("cik")
+            if not cik:
+                continue
+            try:
+                filings = edgar.fetch_recent_form4s(cik, lookback_days=max(3, hours // 24 + 1))
+            except Exception:
+                continue
+
+            filing = next((f for f in filings if f["accession"] == entry["accession"]), None)
+            if not filing:
+                continue
+
+            # Date check
+            try:
+                filed_dt = datetime.fromisoformat(filing["filed"]).replace(tzinfo=timezone.utc)
+                if filed_dt < cutoff_dt:
+                    continue
+            except Exception:
+                pass
+
+            try:
+                details = edgar.fetch_form4_details(cik, filing["accession"], filing["primary_doc"])
+            except Exception:
+                continue
+            if not details:
+                continue
+
+            ticker = details.get("ticker") or ""
+            if not ticker:
+                continue
+
+            if not _is_qualifying_role(details, filters.get("roles", "exec")):
+                continue
+
+            buys = [
+                t for t in details.get("transactions", [])
+                if t["code"] == "P" and t.get("acquired")
+                and t["value"] >= filters.get("min_buy_value", 5000)
+            ]
+            if not buys:
+                continue
+
+            processed += 1
+            try:
+                passes, market = _passes_market_filters(ticker, filters)
+            except Exception:
+                continue
+
+            best = max(buys, key=lambda t: t["value"])
+            score, factors = calc_insider_score(best, details, market)
+
+            entry_data = {
+                "ticker":  ticker,
+                "company": details["company"],
+                "role":    details.get("role", "?"),
+                "buy":     best["value"],
+                "score":   score,
+                "factors": factors,
+                "filed":   filing["filed"],
+                "passes":  passes,
+            }
+
+            if passes and score >= filters.get("min_score", 30):
+                results.append(entry_data)
+            elif score >= filters.get("min_score", 30) - 10:
+                near.append(entry_data)
+
+            _time.sleep(0.15)
+
+        return results, near, processed
+
+    try:
+        outcome = await asyncio.wait_for(loop.run_in_executor(None, _run_discover), timeout=55)
+    except asyncio.TimeoutError:
+        await interaction.followup.send("Search timed out — try a shorter window (e.g. `/discover hours:6`).")
+        return
+    except Exception as e:
+        await interaction.followup.send(f"Error during search: {e}")
+        return
+
+    if isinstance(outcome[0], str):
+        await interaction.followup.send(outcome[0])
+        return
+
+    results, near, processed = outcome
+
+    if not results and not near:
+        await interaction.followup.send(
+            f"No qualifying insider buys found in the last {hours}h "
+            f"({processed} Form 4s checked against current filters).\n"
+            "Try `/filter` to loosen the criteria, or a longer window."
+        )
+        return
+
+    lines = []
+    for r in sorted(results, key=lambda x: x["score"], reverse=True)[:10]:
+        lines.append(
+            f"🎯 **${r['ticker']}** — {r['role']} bought **${r['buy']:,.0f}** "
+            f"· score {r['score']} · filed {r['filed']}"
+        )
+    for r in sorted(near, key=lambda x: x["score"], reverse=True)[:5]:
+        lines.append(
+            f"🟡 **${r['ticker']}** — {r['role']} bought **${r['buy']:,.0f}** "
+            f"· score {r['score']} (near miss) · filed {r['filed']}"
+        )
+
+    embed = discord.Embed(
+        title=f"🔍 Discovery Search — Last {hours}h",
+        description="\n".join(lines),
+        color=0x57f287 if results else 0xfee75c,
+    )
+    embed.set_footer(text=f"{len(results)} qualifying · {len(near)} near misses · {processed} Form 4s checked")
+    await interaction.followup.send(embed=embed)
+
+
 # ── Context menu: right-click any message containing $TICKER ──────────────────
 
 @client.tree.context_menu(name="Lookup in SINSI")
@@ -641,10 +846,10 @@ async def context_lookup(interaction: discord.Interaction, message: discord.Mess
         )
         return
     ticker = tickers[0].upper()
-    await interaction.response.defer(ephemeral=True)
+    await interaction.response.defer()
     loop = asyncio.get_event_loop()
     msg  = await loop.run_in_executor(None, _do_lookup, ticker)
-    await interaction.followup.send(msg, view=AddToWatchlistView(ticker), ephemeral=True)
+    await interaction.followup.send(msg, view=AddToWatchlistView(ticker))
 
 
 # ── Status webhook ─────────────────────────────────────────────────────────────
@@ -662,16 +867,33 @@ def _post_status(message: str) -> None:
 
 # ── Entry point ────────────────────────────────────────────────────────────────
 
+_OFFLINE_MSG = (
+    "🔴 **SINSI has gone offline.** Alerts are paused.\n"
+    "Slash commands won't respond until it's back. Spam Tijn to turn his PC on."
+)
+_offline_posted = False
+
+
+def _post_offline() -> None:
+    global _offline_posted
+    if not _offline_posted:
+        _offline_posted = True
+        _post_status(_OFFLINE_MSG)
+
+
+def _sigterm_handler(signum, frame):
+    _post_offline()
+    raise SystemExit(0)
+
+
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit(
             "DISCORD_BOT_TOKEN not set in .env\n"
             "Get one at: https://discord.com/developers/applications"
         )
+    signal.signal(signal.SIGTERM, _sigterm_handler)
     try:
         client.run(TOKEN)
     finally:
-        _post_status(
-            "🔴 **SINSI has gone offline.** Alerts are paused.\n"
-            "Slash commands won't respond until it's back. Spam Tijn to turn his PC on."
-        )
+        _post_offline()

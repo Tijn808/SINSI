@@ -34,7 +34,7 @@ def calc_insider_score(
     value        = txn.get("value")   or 0.0
     shares_txn   = txn.get("shares")  or 0.0
     owned_after  = txn.get("owned_after") or 0.0
-    is_plan      = details.get("is_10b5_plan", False)
+    is_plan      = txn.get("is_plan", details.get("is_10b5_plan", False))
     role_raw     = (details.get("role") or "").lower()
     price        = market.get("price")
 
@@ -174,7 +174,7 @@ def calc_insider_sell_score(
     factors: list[str] = []
 
     value            = txn.get("value")           or 0.0
-    is_plan          = details.get("is_10b5_plan", False)
+    is_plan          = txn.get("is_plan", details.get("is_10b5_plan", False))
     is_exercise_dump = txn.get("is_exercise_dump", False)
     role_raw         = (details.get("role") or "").lower()
     price            = market.get("price")

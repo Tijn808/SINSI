@@ -6,6 +6,8 @@ MIN_BUY_VALUE_USD      = 5_000   # absolute floor — anything below this is noi
 BIG_BUY_VALUE_USD      = 500_000 # flag as "large buy" above this
 MIN_SIGNIFICANCE_SCORE = 30      # significance gate — buys scoring below this are not posted
                                   # 30–45: notable, 45–60: strong, 60+: exceptional
+MIN_SELL_SCORE         = 45      # sells are noisier — require stronger signal to post
+                                  # 45 = CEO selling 50%+ position, or near 52W high
 
 # Transaction codes that are NOT genuine buying decisions — skip them
 # M=option exercise, A=award/grant, G=gift, F=tax withholding, J=other, W=will
@@ -55,6 +57,19 @@ PCT_FROM_52W_LOW  = 0.15   # within 15% of 52W low = near the bottom
 # is worth flagging even when the exec-only role filter is active.
 DIRECTOR_BUY_MAX_CAP   = 100_000_000  # $100M — micro-cap threshold
 DIRECTOR_BUY_MIN_SHORT = 0.15         # 15% short interest minimum
+
+# ── Large cap thresholds ──────────────────────────────────────────────────────
+# Tiered minimum buy value — small buys at large caps are noise
+LARGE_CAP_THRESHOLD    = 500_000_000   # $500M — above this = large cap
+MEGA_CAP_THRESHOLD     = 5_000_000_000 # $5B   — above this = mega cap
+MIN_BUY_LARGE_CAP      = 50_000        # $50K minimum for $500M–$5B companies
+MIN_BUY_MEGA_CAP       = 100_000       # $100K minimum for $5B+ companies
+
+# Suppress squeeze score on large caps — it's not a relevant signal above this
+SQUEEZE_SUPPRESS_CAP   = 2_000_000_000 # $2B
+
+# Fetch more filings for large caps (more insiders filing)
+LOOKUP_FILING_LIMIT    = 40            # raised from 15
 
 # ── Polling ───────────────────────────────────────────────────────────────────
 POLL_INTERVAL = 300   # seconds between full scans (5 min)

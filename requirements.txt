@@ -3,3 +3,4 @@ python-dotenv==1.0.1
 beautifulsoup4==4.12.3
 lxml==5.2.2
 discord.py>=2.3.0
+matplotlib>=3.8.0

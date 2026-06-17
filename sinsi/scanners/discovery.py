@@ -27,7 +27,8 @@ from data import edgar
 from data.market import calc_squeeze_score, get_borrow_rate, get_market_data
 from data.score import calc_insider_score
 
-FILTERS_FILE = Path("filters.json")
+FILTERS_FILE    = Path("filters.json")
+DAILY_LOG_FILE  = Path("daily_log.json")
 
 # Officer title keywords that count as "exec" role
 _EXEC_KEYWORDS = {
@@ -43,8 +44,41 @@ _EXEC_KEYWORDS = {
 
 EDGAR_GENERAL_FEED = (
     "https://www.sec.gov/cgi-bin/browse-edgar"
-    "?action=getcurrent&type=4&dateb=&owner=include&count=40&output=atom"
+    "?action=getcurrent&type=4&dateb=&owner=include&count=100&output=atom"
 )
+
+
+# ── Daily log ──────────────────────────────────────────────────────────────────
+
+def _today() -> str:
+    from datetime import date
+    return date.today().isoformat()
+
+
+def _load_daily_log() -> dict:
+    if DAILY_LOG_FILE.exists():
+        data = json.loads(DAILY_LOG_FILE.read_text())
+        if data.get("date") == _today():
+            return data
+    fresh = {"date": _today(), "discoveries": [], "near_misses": [], "summary_posted": False}
+    DAILY_LOG_FILE.write_text(json.dumps(fresh, indent=2))
+    return fresh
+
+
+def _append_daily(kind: str, entry: dict) -> None:
+    log = _load_daily_log()
+    log[kind].append(entry)
+    DAILY_LOG_FILE.write_text(json.dumps(log, indent=2))
+
+
+def mark_summary_posted() -> None:
+    log = _load_daily_log()
+    log["summary_posted"] = True
+    DAILY_LOG_FILE.write_text(json.dumps(log, indent=2))
+
+
+def get_daily_log() -> dict:
+    return _load_daily_log()
 
 
 # ── Filter loading ─────────────────────────────────────────────────────────────
@@ -231,6 +265,7 @@ def run(state: dict) -> None:
 
         # Filter: role
         if not _is_qualifying_role(details, filters.get("roles", "exec")):
+            print(f"  [discovery] {ticker} — skipped (role: {details.get('role', '?')})")
             continue
 
         # Filter: at least one qualifying transaction (absolute floor only)
@@ -241,6 +276,8 @@ def run(state: dict) -> None:
             and t["value"] >= filters.get("min_buy_value", config.MIN_BUY_VALUE_USD)
         ]
         if not qualifying_txns:
+            codes = [t["code"] for t in details["transactions"]]
+            print(f"  [discovery] {ticker} — skipped (no qualifying buy, codes: {codes})")
             continue
 
         # ── Stage 2: Finviz market filter ─────────────────────────────────
@@ -250,6 +287,15 @@ def run(state: dict) -> None:
             continue
 
         best_txn = max(qualifying_txns, key=lambda t: t["value"])
+
+        if not passes:
+            cap   = market.get("market_cap")
+            flt   = market.get("float_shares")
+            price = market.get("price")
+            cap_str   = f"${cap/1e6:.0f}M"   if cap   else "?"
+            flt_str   = f"{flt/1e6:.0f}M sh" if flt   else "?"
+            price_str = f"${price:.2f}"       if price else "?"
+            print(f"  [discovery] {ticker} — skipped (market: cap={cap_str} float={flt_str} price={price_str})")
 
         # Director buy special case: flag even if exec filter would block it,
         # when the company is a micro-cap with meaningful short interest.
@@ -268,11 +314,23 @@ def run(state: dict) -> None:
             continue
 
         # ── Significance score ─────────────────────────────────────────────
-        # Gate on composite score — replaces crude price-action-only check.
         score, sig_factors = calc_insider_score(best_txn, details, market)
         min_score = filters.get("min_score", config.MIN_SIGNIFICANCE_SCORE)
         if score < min_score and not is_director_special:
-            print(f"  [discovery] {ticker} score {score} below threshold — skipped")
+            print(f"  [discovery] {ticker} — near miss (score {score} < {min_score}, role: {details.get('role', '?')}, buy: ${best_txn['value']:,.0f})")
+            _append_daily("near_misses", {
+                "ticker":  ticker,
+                "company": details["company"],
+                "role":    details.get("role", "?"),
+                "buy":     best_txn["value"],
+                "score":   score,
+                "link":    entry["link"],
+            })
+            import discord_bot as db
+            try:
+                db.post_near_miss(ticker, entry, details, best_txn, market, score, min_score, sig_factors)
+            except Exception as e:
+                print(f"  [discovery] near miss post failed: {e}")
             continue
 
         # Enrich with squeeze context (market data already fetched, no extra API call)
@@ -288,6 +346,14 @@ def run(state: dict) -> None:
             f"  [discovery] {'🎯' if is_director_special else '✓'} {ticker} — "
             f"score {score} · {details['role']} bought ${best_txn['value']:,.0f}"
         )
+        _append_daily("discoveries", {
+            "ticker":  ticker,
+            "company": details["company"],
+            "role":    details.get("role", "?"),
+            "buy":     best_txn["value"],
+            "score":   score,
+            "link":    entry["link"],
+        })
 
         alert = InsiderBuyAlert(
             ticker       = ticker,

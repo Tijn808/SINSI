@@ -55,7 +55,7 @@ def fetch_recent_filings(cik: str, form_types: set[str], lookback_days: int) -> 
     Return filings of the specified form types within lookback_days.
     Each dict has: form, accession, primary_doc, filed.
     """
-    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    url = f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json"
     data = _get(url).json()
     recent = data["filings"]["recent"]
     cutoff = date.today() - timedelta(days=lookback_days)
@@ -84,7 +84,7 @@ def fetch_recent_form4s(cik: str, lookback_days: int) -> list[dict]:
     Return Form 4 filings for a company filed within the last lookback_days.
     Each dict has: accession, primary_doc, filed.
     """
-    url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+    url = f"https://data.sec.gov/submissions/CIK{int(cik):010d}.json"
     data = _get(url).json()
     recent = data["filings"]["recent"]
     cutoff = date.today() - timedelta(days=lookback_days)
@@ -163,16 +163,35 @@ def _parse_form4_xml(xml_text: str) -> dict | None:
     else:
         role = "Insider"
 
+    # Build footnote lookup: id → text
+    footnote_map = {
+        el.get("id", ""): (el.text or "").lower()
+        for el in root.findall(".//footnote")
+    }
+
+    def _txn_is_plan(txn_el) -> bool:
+        # Check dedicated planName element (newer EDGAR schema)
+        plan_el = txn_el.find(".//planName")
+        if plan_el is not None and (plan_el.text or "").strip():
+            return True
+        # Check footnotes referenced by this specific transaction
+        for fn_ref in txn_el.findall(".//footnoteId"):
+            fn_id   = fn_ref.get("id", "")
+            fn_text = footnote_map.get(fn_id, "")
+            if "10b5-1" in fn_text and "not pursuant" not in fn_text:
+                return True
+        return False
+
     transactions = []
     for txn in root.findall(".//nonDerivativeTransaction"):
         def txn_txt(path):
             el = txn.find(path)
             return (el.text or "").strip() if el is not None else ""
 
-        code   = txn_txt(".//transactionCode")
-        shares = _safe_float(txn_txt(".//transactionShares/value"))
-        price  = _safe_float(txn_txt(".//transactionPricePerShare/value"))
-        owned  = _safe_float(txn_txt(".//sharesOwnedFollowingTransaction/value"))
+        code     = txn_txt(".//transactionCode")
+        shares   = _safe_float(txn_txt(".//transactionShares/value"))
+        price    = _safe_float(txn_txt(".//transactionPricePerShare/value"))
+        owned    = _safe_float(txn_txt(".//sharesOwnedFollowingTransaction/value"))
         acquired = txn_txt(".//transactionAcquiredDisposedCode/value") == "A"
 
         transactions.append({
@@ -182,11 +201,11 @@ def _parse_form4_xml(xml_text: str) -> dict | None:
             "value":       shares * price,
             "acquired":    acquired,
             "owned_after": owned,
+            "is_plan":     _txn_is_plan(txn),
         })
 
-    # Check footnotes for 10b5-1 plan mentions
-    footnotes = " ".join((el.text or "") for el in root.findall(".//footnote"))
-    is_10b5_plan = "10b5-1" in footnotes.lower()
+    # Filing-level plan flag: true only if ALL transactions are plans
+    is_10b5_plan = bool(transactions) and all(t["is_plan"] for t in transactions)
 
     return {
         "ticker":       ticker,

@@ -6,7 +6,7 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=tijn-saes
-WorkingDirectory=/home/tijn-saes/Documents/BOT
+WorkingDirectory=/home/tijn-saes/Documents/BOT/sinsi
 ExecStart=/home/tijn-saes/Documents/BOT/.venv/bin/python main.py
 Restart=always
 RestartSec=10

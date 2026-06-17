@@ -392,6 +392,89 @@ def post_discovery(
     ))
 
 
+def post_near_miss(
+    ticker: str,
+    entry: dict,
+    details: dict,
+    txn: dict,
+    market: dict,
+    score: int,
+    min_score: int,
+    sig_factors: list[str] | None = None,
+) -> None:
+    cap   = market.get("market_cap")
+    price = market.get("price")
+    short = market.get("short_pct_float")
+
+    description = (
+        f"**{details['owner_name']}** ({details['role']}) bought "
+        f"**{_fmt_usd(txn['value'])}** of **${ticker}** at {details['company']}.\n"
+        f"> Score **{score}/{min_score}** — just below your discovery threshold."
+    )
+
+    fields = [
+        {"name": "Market Cap", "value": _fmt_cap(cap),               "inline": True},
+        {"name": "Price",      "value": f"${price:.2f}" if price else "N/A", "inline": True},
+        {"name": "Score",      "value": _score_bar(score),            "inline": False},
+    ]
+    if short:
+        fields.append({"name": "Short Float", "value": f"{short:.0%}", "inline": True})
+    if sig_factors:
+        fields.append({
+            "name":  "Factors",
+            "value": "\n".join(f"• {f}" for f in sig_factors),
+            "inline": False,
+        })
+
+    embed = {
+        "author":      {"name": details["company"]},
+        "title":       f"🔎 Near Miss — ${ticker}",
+        "url":         entry["link"],
+        "description": description,
+        "fields":      fields,
+        "footer":      {"text": f"Filed {entry.get('filed', '?')} · raise /filter min score to see fewer of these"},
+    }
+    _post("discovery", embed, _buttons(
+        ("📄 View Filing", entry["link"]),
+        ("📊 Finviz",      f"https://finviz.com/quote.ashx?t={ticker}"),
+    ))
+
+
+def post_daily_summary(date: str, discoveries: list, near_misses: list) -> None:
+    from alerts import _fmt_usd
+
+    total = len(discoveries) + len(near_misses)
+    if total == 0:
+        description = "No insider buys passed the discovery filters today."
+    else:
+        description = (
+            f"**{len(discoveries)}** discovery alert{'s' if len(discoveries) != 1 else ''} posted · "
+            f"**{len(near_misses)}** near miss{'es' if len(near_misses) != 1 else ''}"
+        )
+
+    fields = []
+
+    if discoveries:
+        lines = []
+        for d in discoveries:
+            lines.append(f"**${d['ticker']}** — {d['role']} bought {_fmt_usd(d['buy'])} · score {d['score']}")
+        fields.append({"name": "✅ Discoveries", "value": "\n".join(lines), "inline": False})
+
+    if near_misses:
+        lines = []
+        for d in near_misses:
+            lines.append(f"**${d['ticker']}** — {d['role']} bought {_fmt_usd(d['buy'])} · score {d['score']}")
+        fields.append({"name": "🔎 Near Misses", "value": "\n".join(lines), "inline": False})
+
+    embed = {
+        "title":       f"📅 Daily Discovery Summary — {date}",
+        "description": description,
+        "fields":      fields,
+        "footer":      {"text": "Market close summary · use /filter to adjust thresholds"},
+    }
+    _post("discovery", embed)
+
+
 def post_dilution_warning(
     ticker: str,
     company: str,
@@ -652,6 +735,97 @@ def post_activist(ticker: str, company: str, filing: dict) -> None:
         "footer": {"text": f"Accession: {filing['accession']}"},
     }
     _post("activist", embed, _buttons(
+        ("📄 View Filing", filing["link"]),
+        ("📊 Finviz",      f"https://finviz.com/quote.ashx?t={ticker}"),
+    ))
+
+
+# ── Smart Money Confluence (SINSI × TINA bridge) ──────────────────────────────
+
+def post_confluence(
+    ticker:       str,
+    company:      str,
+    filing:       dict,
+    details:      dict,
+    txn:          dict,
+    score:        int,
+    institutions: list[dict],
+) -> None:
+    """Fire when an insider buy on a SINSI watchlist ticker is ALSO held by TINA funds.
+
+    institutions: list from tina_bridge.get_institutional_holdings()
+    """
+    total_inst = sum(h["value_usd"] for h in institutions)
+    inst_lines = "\n".join(
+        f"• **{h['fund']}** — {_fmt_usd(h['value_usd'])} ({h['weight_pct']:.2f}% of book) · {h['quarter']}"
+        for h in sorted(institutions, key=lambda x: x["value_usd"], reverse=True)
+    )
+    n = len(institutions)
+
+    embed = {
+        "author": {"name": company},
+        "title":  f"🔥 Smart Money Confluence — ${ticker}",
+        "description": (
+            f"**Insider buy** (score {score}) **+** "
+            f"**{n}** institutional holder{'s' if n > 1 else ''} align on **${ticker}**.\n\n"
+            f"**Insider:** {details['owner_name']} ({details['role']}) "
+            f"bought {_fmt_usd(txn['value'])} · {filing['filed']}\n\n"
+            f"**Institutional exposure ({_fmt_usd(total_inst)} combined):**\n{inst_lines}"
+        ),
+        "fields": [
+            {
+                "name":   "Signal strength",
+                "value":  f"Insider score **{score}/100** · **{n}** TINA fund{'s' if n != 1 else ''}",
+                "inline": False,
+            },
+        ],
+        "footer": {"text": f"SINSI × TINA · {filing['accession']}"},
+    }
+    COLORS["confluence"] = 0xFF9F00  # amber-gold
+    _post("confluence", embed, _buttons(
+        ("📄 Filing",   filing["link"]),
+        ("📊 Finviz",   f"https://finviz.com/quote.ashx?t={ticker}"),
+    ))
+
+
+# ── Activist filing on a TINA-held ticker (13D/G fast lane) ───────────────────
+
+def post_activist_tina(
+    ticker:       str,
+    company:      str,
+    filing:       dict,
+    institutions: list[dict],
+) -> None:
+    """Fire when an activist 13D/13G is filed on a stock that TINA's institutions hold.
+
+    institutions: list from tina_bridge.get_all_tina_tickers()[ticker]
+    """
+    total_inst = sum(h["value_usd"] for h in institutions)
+    inst_lines = "\n".join(
+        f"• **{h['fund']}** — {_fmt_usd(h['value_usd'])} ({h['weight_pct']:.2f}% of book)"
+        for h in sorted(institutions, key=lambda x: x["value_usd"], reverse=True)
+    )
+    n = len(institutions)
+
+    embed = {
+        "author": {"name": company},
+        "title":  f"🔵 Activist + Institutional — ${ticker}",
+        "url":    filing["link"],
+        "description": (
+            f"**{filing['filer']}** filed a **{filing['form_type']}** (5%+ stake), and "
+            f"**{n}** followed institution{'s' if n > 1 else ''} "
+            f"already hold **${ticker}**.\n\n"
+            f"**Institutional holders ({_fmt_usd(total_inst)} combined):**\n{inst_lines}"
+        ),
+        "fields": [
+            {"name": "Form",   "value": filing["form_type"], "inline": True},
+            {"name": "Filer",  "value": filing["filer"],     "inline": True},
+            {"name": "Filed",  "value": filing["filed"],     "inline": True},
+        ],
+        "footer": {"text": f"13D/G fast lane · SINSI × TINA · {filing['accession']}"},
+    }
+    COLORS["activist_tina"] = 0x1F8EF1  # brighter blue than standard activist
+    _post("activist_tina", embed, _buttons(
         ("📄 View Filing", filing["link"]),
         ("📊 Finviz",      f"https://finviz.com/quote.ashx?t={ticker}"),
     ))

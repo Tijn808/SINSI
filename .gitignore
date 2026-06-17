@@ -8,5 +8,7 @@ seen_filings.json
 state/
 *.log
 logs.txt
+*-logs.txt
+daily_log.json
 filters.json
 watchlist.json

@@ -22,10 +22,30 @@ Usage:
 """
 
 import argparse
+import fcntl
 import json
+import os
 import sys
 import time
 from pathlib import Path
+
+# Guard: must be run from the sinsi/ directory so relative paths resolve correctly
+if not Path("watchlist.json").exists() and not Path("config.py").exists():
+    print("ERROR: Run this from the sinsi/ directory, not the repo root.", file=sys.stderr)
+    print("  cd sinsi && ../.venv/bin/python main.py", file=sys.stderr)
+    sys.exit(1)
+
+# Prevent multiple scanner instances running simultaneously (causes duplicate posts)
+_LOCK_FILE = Path("state/.sinsi-scanner.lock")
+_LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+_lock_fd = open(_LOCK_FILE, "w")
+try:
+    fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    _lock_fd.write(str(os.getpid()))
+    _lock_fd.flush()
+except BlockingIOError:
+    print("ERROR: Another sinsi/main.py is already running. Exiting to prevent duplicate posts.")
+    sys.exit(1)
 
 import config
 import state as st
@@ -266,7 +286,7 @@ def cmd_lookup(ticker: str) -> None:
     recent_txns: list[dict] = []
     try:
         filings = edgar.fetch_recent_form4s(cik, lookback_days=30)
-        for filing in filings[:15]:
+        for filing in filings[:config.LOOKUP_FILING_LIMIT]:
             details = edgar.fetch_form4_details(cik, filing["accession"], filing["primary_doc"])
             if not details:
                 continue
@@ -353,6 +373,12 @@ def run_loop() -> None:
             print(f"  [activist] Fatal: {e}")
 
         try:
+            print(" 13D/G fast lane (TINA institutional holdings)")
+            activist.run_tina(wl, state)
+        except Exception as e:
+            print(f"  [activist-tina] Fatal: {e}")
+
+        try:
             print(" Discovery (small-cap insider buys)")
             discovery.run(state)
         except Exception as e:
@@ -361,8 +387,36 @@ def run_loop() -> None:
         st.prune_old_cluster_data(state, config.CLUSTER_WINDOW_DAYS)
         st.save(state)
 
+        _maybe_post_daily_summary()
+
         print(f"[{_now()}] Scan complete. Next in {config.POLL_INTERVAL}s.")
         time.sleep(config.POLL_INTERVAL)
+
+
+def _maybe_post_daily_summary() -> None:
+    from datetime import datetime, timezone
+    from scanners.discovery import get_daily_log, mark_summary_posted
+    import discord_bot
+
+    # Post once per day after 20:30 UTC (4:30 PM ET)
+    now = datetime.now(timezone.utc)
+    if now.hour < 20 or (now.hour == 20 and now.minute < 30):
+        return
+
+    log = get_daily_log()
+    if log.get("summary_posted"):
+        return
+
+    print(f"[{_now()}] Posting daily discovery summary…")
+    try:
+        discord_bot.post_daily_summary(
+            log["date"],
+            log.get("discoveries", []),
+            log.get("near_misses", []),
+        )
+        mark_summary_posted()
+    except Exception as e:
+        print(f"  [summary] Failed to post: {e}")
 
 
 def _now() -> str:

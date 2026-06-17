@@ -27,11 +27,28 @@ import time
 import config
 import discord_bot
 import state as st
+import tina_bridge
 from alerts import InsiderBuyAlert
 from data import edgar
 from data.dispositions import classify_dispositions
 from data.market import calc_squeeze_score, get_borrow_rate, get_market_data
 from data.score import calc_insider_score, calc_insider_sell_score
+
+
+def _min_buy_for_cap(market_cap: float | None) -> float:
+    if market_cap is None:
+        return config.MIN_BUY_VALUE_USD
+    if market_cap >= config.MEGA_CAP_THRESHOLD:
+        return config.MIN_BUY_MEGA_CAP
+    if market_cap >= config.LARGE_CAP_THRESHOLD:
+        return config.MIN_BUY_LARGE_CAP
+    return config.MIN_BUY_VALUE_USD
+
+
+def _should_show_squeeze(market_cap: float | None) -> bool:
+    if market_cap is None:
+        return True
+    return market_cap < config.SQUEEZE_SUPPRESS_CAP
 
 
 def run(watchlist: dict, state: dict) -> None:
@@ -82,10 +99,12 @@ def _scan_company(ticker: str, cik: str, state: dict) -> None:
         )
 
         # ── Buy pipeline ───────────────────────────────────────────────────────
+        min_buy = _min_buy_for_cap(market.get("market_cap"))
+        show_squeeze = _should_show_squeeze(market.get("market_cap"))
         for txn in details["transactions"]:
             if txn["code"] != "P" or not txn["acquired"]:
                 continue
-            if txn["value"] < config.MIN_BUY_VALUE_USD:
+            if txn["value"] < min_buy:
                 continue
 
             score, factors = calc_insider_score(txn, details, market)
@@ -115,8 +134,8 @@ def _scan_company(ticker: str, cik: str, state: dict) -> None:
                 score           = score,
                 sig_factors     = factors,
                 market          = market,
-                squeeze_score   = squeeze_score if squeeze_score >= 30 else None,
-                squeeze_factors = squeeze_factors,
+                squeeze_score   = squeeze_score if (squeeze_score >= 30 and show_squeeze) else None,
+                squeeze_factors = squeeze_factors if show_squeeze else [],
                 borrow_rate     = _borrow_rate,
                 is_cluster      = len(cluster_window) >= config.CLUSTER_MIN_INSIDERS - 1,
                 cluster_buys    = cluster_window,
@@ -128,6 +147,30 @@ def _scan_company(ticker: str, cik: str, state: dict) -> None:
             )
             alert.post()
             time.sleep(1)
+
+            # SINSI × TINA bridge: check if this ticker is also held institutionally
+            try:
+                institutions = tina_bridge.get_institutional_holdings(ticker)
+                if institutions:
+                    key = f"confluence:{filing['accession']}"
+                    if not st.is_seen(state, key):
+                        st.mark_seen(state, key)
+                        print(
+                            f"    → Confluence: {ticker} held by "
+                            f"{len(institutions)} TINA fund(s)"
+                        )
+                        discord_bot.post_confluence(
+                            ticker=ticker,
+                            company=details["company"],
+                            filing=filing,
+                            details=details,
+                            txn=txn,
+                            score=score,
+                            institutions=institutions,
+                        )
+                        time.sleep(1)
+            except Exception as e:
+                print(f"    [bridge] Confluence check failed: {e}")
 
             st.add_cluster_buy(state, cik, {
                 "owner_name": details["owner_name"],
@@ -141,11 +184,11 @@ def _scan_company(ticker: str, cik: str, state: dict) -> None:
         # classify_dispositions() handles: drop F/G/U/D, keep only S, detect
         # exercise-and-dump pairs, pre-compute pct_sold.
         for txn in classify_dispositions(details["transactions"]):
-            if txn["value"] < config.MIN_BUY_VALUE_USD:
+            if txn["value"] < min_buy:
                 continue
 
             score, factors = calc_insider_sell_score(txn, details, market)
-            if score < config.MIN_SIGNIFICANCE_SCORE:
+            if score < config.MIN_SELL_SCORE:
                 print(
                     f"    → Skip sell (score {score}): {details['owner_name']} "
                     f"({details['role']}) ${txn['value']:,.0f}"

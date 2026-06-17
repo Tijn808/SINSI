@@ -41,12 +41,13 @@ ALLOWED_CHANNEL_ID=your_channel_id_here
 
 `DISCORD_WEBHOOK_URL` is used by the scanner to post alerts. `DISCORD_BOT_TOKEN` powers the slash command bot. `ALLOWED_CHANNEL_ID` restricts slash commands to one channel (right-click any channel in Discord with Developer Mode on → Copy Channel ID). Leave it blank to allow commands anywhere.
 
-Add your first ticker and start both processes:
+Add your first ticker and start both processes (run from the `sinsi/` directory):
 
 ```
-sec --add ONDS
-nohup sec > logs.txt 2>&1 &
-nohup python bot.py > bot-logs.txt 2>&1 &
+cd sinsi
+../.venv/bin/python insider_scanner.py --add ONDS
+nohup ../.venv/bin/python main.py > scanner-logs.txt 2>&1 &
+nohup ../.venv/bin/python bot.py > bot-logs.txt 2>&1 &
 ```
 
 ## Discord slash commands
