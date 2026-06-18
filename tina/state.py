@@ -189,3 +189,17 @@ def prune_enter_events(st: dict, active_periods: set[str]) -> None:
     stale  = [k for k in bucket if k.split(":", 1)[1] not in active_periods]
     for k in stale:
         del bucket[k]
+
+
+# ── Pile-in alert tracking ────────────────────────────────────────────────────
+
+def get_pile_in_alerted(st: dict, period: str) -> set[str]:
+    """Return set of tickers already auto-alerted for pile-in in the given period."""
+    return set(st.get("pile_in_alerted", {}).get(period, []))
+
+
+def mark_pile_in_alerted(st: dict, ticker: str, period: str) -> None:
+    bucket = st.setdefault("pile_in_alerted", {})
+    tickers = bucket.setdefault(period, [])
+    if ticker not in tickers:
+        tickers.append(ticker)

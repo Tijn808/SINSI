@@ -375,6 +375,34 @@ def post_sinsi_crossref(
     }]})
 
 
+# ── Auto: pile-in alert ───────────────────────────────────────────────────────
+
+def post_pile_in_alert(
+    ticker: str,
+    new_fund: str,
+    other_funds: list[str],
+    total_value: float,
+    market_cap: float | None,
+    period: str,
+) -> None:
+    """Auto-posted when a new 13F creates multi-fund convergence on a small-cap stock."""
+    all_funds = [new_fund] + [f for f in other_funds if f != new_fund]
+    cap_str = ""
+    if market_cap:
+        cap_str = f" · **${market_cap/1e6:.0f}M** cap" if market_cap < 1e9 else f" · **${market_cap/1e9:.1f}B** cap"
+
+    _post_json({"embeds": [{
+        "title":       f"📊 Small-Cap Pile-In — ${ticker}",
+        "description": (
+            f"**{len(all_funds)}** followed funds converging on **${ticker}**{cap_str}\n\n"
+            + "\n".join(f"• {f}" + (" ← new" if f == new_fund else "") for f in all_funds)
+            + f"\n\n**{_usd(total_value)}** total institutional exposure"
+        ),
+        "color":  0x27ae60,
+        "footer": {"text": f"TINA — pile-in signal · {period}"},
+    }]})
+
+
 # ── Status ────────────────────────────────────────────────────────────────────
 
 def post_status(msg: str) -> None:

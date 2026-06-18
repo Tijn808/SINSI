@@ -229,6 +229,54 @@ def run_scan(funds: list[dict], st: dict) -> None:
             overlap_enters=overlap_enters or None,
         )
 
+        # ── Pile-in auto-alerts: small-cap stocks now held by 2+ followed funds ─
+
+        if not is_first:
+            alerted_pile_in = state_mod.get_pile_in_alerted(st, period)
+            pile_in_candidates = [
+                {
+                    "ticker":      ev.ticker,
+                    "other_funds": ticker_funds.get(ev.ticker, []),
+                    "enter_value": ev.value_usd,
+                }
+                for ev in events
+                if ev.type == "ENTER"
+                and ev.ticker
+                and len(ticker_funds.get(ev.ticker, [])) >= 1
+                and ev.ticker not in alerted_pile_in
+            ]
+            if pile_in_candidates:
+                try:
+                    cap_data = market_mod.get_ticker_screen(
+                        [c["ticker"] for c in pile_in_candidates],
+                        limit=len(pile_in_candidates),
+                    )
+                except Exception:
+                    cap_data = {}
+                for c in pile_in_candidates:
+                    ticker = c["ticker"]
+                    cap    = cap_data.get(ticker, {}).get("market_cap")
+                    if cap is not None and cap > 2_000_000_000:
+                        continue
+                    total_inst = (
+                        sum(
+                            p.get("value_usd", 0)
+                            for o_data in st.get("funds", {}).values()
+                            for p in o_data.get("positions", {}).values()
+                            if p.get("ticker") == ticker
+                        )
+                        + c["enter_value"]
+                    )
+                    discord_bot.post_pile_in_alert(
+                        ticker=ticker,
+                        new_fund=name,
+                        other_funds=c["other_funds"],
+                        total_value=total_inst,
+                        market_cap=cap,
+                        period=period,
+                    )
+                    state_mod.mark_pile_in_alerted(st, ticker, period)
+
         # ── Persist new positions ─────────────────────────────────────────────
 
         new_positions = {
