@@ -62,17 +62,19 @@ def _finviz_get(ticker: str) -> str:
 
 
 def _parse_finviz_stats(html: str) -> dict[str, str]:
-    """Extract all label→value pairs from Finviz's snapshot stats table."""
-    soup = BeautifulSoup(html, "html.parser")
-    table = soup.find("table", class_="snapshot-table2")
-    if not table:
-        return {}
-    cells = table.find_all("td")
+    """Extract all label→value pairs from Finviz's snapshot stats tables.
+
+    Finviz now renders two snapshot-table2 tables (fundamentals + trading stats).
+    We merge all of them so callers get every field regardless of which table it's in.
+    """
+    soup  = BeautifulSoup(html, "html.parser")
     stats: dict[str, str] = {}
-    for i in range(0, len(cells) - 1, 2):
-        label = cells[i].get_text(strip=True)
-        value = cells[i + 1].get_text(strip=True)
-        stats[label] = value
+    for table in soup.find_all("table", class_="snapshot-table2"):
+        cells = table.find_all("td")
+        for i in range(0, len(cells) - 1, 2):
+            label = cells[i].get_text(strip=True)
+            value = cells[i + 1].get_text(strip=True)
+            stats[label] = value
     return stats
 
 
